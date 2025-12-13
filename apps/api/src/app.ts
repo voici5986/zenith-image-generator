@@ -330,6 +330,38 @@ export function createApp(config: AppConfig = {}) {
     }
   })
 
+  // Image proxy endpoint (for CORS bypass when downloading external images)
+  app.get('/proxy-image', async (c) => {
+    const url = c.req.query('url')
+
+    if (!url || typeof url !== 'string') {
+      return sendError(c, Errors.invalidParams('url', 'url query parameter is required'))
+    }
+
+    if (!isAllowedImageUrl(url)) {
+      return sendError(c, Errors.invalidParams('url', 'URL not allowed'))
+    }
+
+    try {
+      const response = await fetch(url)
+      if (!response.ok) {
+        return sendError(c, Errors.generationFailed('Image Proxy', `Failed to fetch image: ${response.status}`))
+      }
+
+      const contentType = response.headers.get('content-type') || 'image/png'
+      const blob = await response.blob()
+
+      return new Response(blob, {
+        headers: {
+          'Content-Type': contentType,
+          'Cache-Control': 'public, max-age=86400',
+        },
+      })
+    } catch (err) {
+      return sendError(c, err)
+    }
+  })
+
   return app
 }
 

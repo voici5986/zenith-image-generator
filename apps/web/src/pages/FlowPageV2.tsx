@@ -28,6 +28,7 @@ import {
 } from '@/lib/constants'
 import { encryptAndStoreToken, loadAllTokens } from '@/lib/crypto'
 import { downloadImagesAsZip } from '@/lib/utils'
+import { getBlob, blobToDataUrl } from '@/lib/imageBlobStore'
 
 const nodeTypes = {
   configNode: ConfigNode,
@@ -157,21 +158,48 @@ function FlowCanvas() {
 
   // Handle download all images
   const handleDownloadAll = useCallback(async () => {
-    // Get all images with URLs
-    const imagesWithUrls = imageNodes.filter((n) => n.data.imageUrl)
-    if (imagesWithUrls.length === 0) {
+    // Get all images with blob or URL data
+    const imagesWithData = imageNodes.filter((n) => n.data.imageBlobId || n.data.imageUrl)
+    if (imagesWithData.length === 0) {
       alert(t('flow.noImages'))
       return
     }
 
     setIsDownloading(true)
-    setDownloadProgress(t('flow.downloadProgress', { current: 0, total: imagesWithUrls.length }))
+    setDownloadProgress(t('flow.downloadProgress', { current: 0, total: imagesWithData.length }))
 
     try {
-      const images = imagesWithUrls.map((node, index) => ({
-        url: node.data.imageUrl as string,
-        filename: `zenith-${index + 1}-${node.data.seed}.png`,
-      }))
+      // Build image list, preferring blob storage over URLs
+      const images: Array<{ url: string; filename: string }> = []
+
+      for (let i = 0; i < imagesWithData.length; i++) {
+        const node = imagesWithData[i]
+        let url: string | null = null
+
+        // Try to get from blob storage first (local, no CORS issues)
+        if (node.data.imageBlobId) {
+          try {
+            const blob = await getBlob(node.data.imageBlobId)
+            if (blob) {
+              url = await blobToDataUrl(blob)
+            }
+          } catch (e) {
+            console.warn('Failed to get blob, falling back to URL:', e)
+          }
+        }
+
+        // Fallback to URL if blob not available
+        if (!url && node.data.imageUrl) {
+          url = node.data.imageUrl
+        }
+
+        if (url) {
+          images.push({
+            url,
+            filename: `zenith-${i + 1}-${node.data.seed}.png`,
+          })
+        }
+      }
 
       await downloadImagesAsZip(
         images,

@@ -6,6 +6,7 @@ import type { ImageData } from '@/stores/flowStore'
 import { useFlowStore } from '@/stores/flowStore'
 import { loadSettings, type ProviderType, getModelsByProvider, getDefaultModel } from '@/lib/constants'
 import { loadAllTokens } from '@/lib/crypto'
+import { storeBlob, getBlob, urlToBlob, blobToObjectUrl, blobToDataUrl } from '@/lib/imageBlobStore'
 import type { ImageDetails } from '@z-image/shared'
 
 interface ImageNodeProps extends NodeProps {
@@ -64,15 +65,63 @@ async function generateImageApi(
 
 function ImageNodeComponent({ id, data }: ImageNodeProps) {
   const { t } = useTranslation()
-  const { prompt, width, height, seed, imageUrl, duration, isLoading, error } = data
+  const { prompt, width, height, seed, imageUrl, imageBlobId, duration, isLoading, error } = data
   const [elapsed, setElapsed] = useState(0)
+  const [displayUrl, setDisplayUrl] = useState<string | null>(null)
   const startTimeRef = useRef(0)
   const generatingRef = useRef(false)
+  const objectUrlRef = useRef<string | null>(null)
 
   const updateImageGenerated = useFlowStore((s) => s.updateImageGenerated)
   const updateImageError = useFlowStore((s) => s.updateImageError)
   const setLightboxImage = useFlowStore((s) => s.setLightboxImage)
   const hasHydrated = useFlowStore((s) => s._hasHydrated)
+
+  // Cleanup object URL on unmount
+  useEffect(() => {
+    return () => {
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current)
+      }
+    }
+  }, [])
+
+  // Load blob for display when we have a blobId
+  useEffect(() => {
+    if (!imageBlobId) {
+      // Fallback to URL if no blob
+      setDisplayUrl(imageUrl || null)
+      return
+    }
+
+    let cancelled = false
+    ;(async () => {
+      try {
+        const blob = await getBlob(imageBlobId)
+        if (cancelled) return
+
+        if (blob) {
+          // Revoke previous object URL
+          if (objectUrlRef.current) {
+            URL.revokeObjectURL(objectUrlRef.current)
+          }
+          const url = blobToObjectUrl(blob)
+          objectUrlRef.current = url
+          setDisplayUrl(url)
+        } else {
+          // Blob not found, fallback to URL
+          setDisplayUrl(imageUrl || null)
+        }
+      } catch (e) {
+        console.error('Failed to load blob:', e)
+        setDisplayUrl(imageUrl || null)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [imageBlobId, imageUrl])
 
   // Timer for elapsed time during generation
   useEffect(() => {
@@ -121,7 +170,20 @@ function ImageNodeComponent({ id, data }: ImageNodeProps) {
           selectedModel,
           seed
         )
-        updateImageGenerated(id, imageDetails.url, imageDetails.duration)
+
+        // Fetch image and store as blob
+        let blobId: string | undefined
+        try {
+          const blob = await urlToBlob(imageDetails.url)
+          const storedId = await storeBlob(id, blob)
+          if (storedId) {
+            blobId = storedId
+          }
+        } catch (e) {
+          console.warn('Failed to store image blob:', e)
+        }
+
+        updateImageGenerated(id, imageDetails.url, imageDetails.duration, blobId)
       } catch (err) {
         updateImageError(id, err instanceof Error ? err.message : 'Failed to generate')
       }
@@ -129,13 +191,34 @@ function ImageNodeComponent({ id, data }: ImageNodeProps) {
   }, [id, prompt, width, height, seed, imageUrl, isLoading, hasHydrated, updateImageGenerated, updateImageError])
 
   const handleDownload = async () => {
-    if (!imageUrl) return
-    const { downloadImage } = await import('@/lib/utils')
-    await downloadImage(imageUrl, `zenith-${Date.now()}.png`)
+    if (!imageBlobId && !imageUrl) return
+
+    try {
+      // Try to get blob from store first
+      if (imageBlobId) {
+        const blob = await getBlob(imageBlobId)
+        if (blob) {
+          const dataUrl = await blobToDataUrl(blob)
+          const a = document.createElement('a')
+          a.href = dataUrl
+          a.download = `zenith-${seed}-${Date.now()}.png`
+          a.click()
+          return
+        }
+      }
+
+      // Fallback to URL download
+      if (imageUrl) {
+        const { downloadImage } = await import('@/lib/utils')
+        await downloadImage(imageUrl, `zenith-${seed}-${Date.now()}.png`)
+      }
+    } catch (e) {
+      console.error('Failed to download image:', e)
+    }
   }
 
   const handleDoubleClick = () => {
-    if (imageUrl) {
+    if (displayUrl || imageUrl) {
       setLightboxImage(id)
     }
   }
@@ -163,10 +246,10 @@ function ImageNodeComponent({ id, data }: ImageNodeProps) {
           <AlertCircle className="w-10 h-10 text-red-400 mb-3" />
           <span className="text-red-400 text-sm text-center">{error}</span>
         </div>
-      ) : imageUrl ? (
+      ) : displayUrl ? (
         <>
           <img
-            src={imageUrl}
+            src={displayUrl}
             alt="Generated"
             className="w-full h-full object-cover"
           />

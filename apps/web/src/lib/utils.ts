@@ -7,6 +7,36 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /**
+ * Get API URL for proxy endpoint
+ */
+function getApiUrl(): string {
+  return import.meta.env.VITE_API_URL || ''
+}
+
+/**
+ * Check if URL needs to be proxied (external URLs that may have CORS issues)
+ */
+function needsProxy(url: string): boolean {
+  if (!url.startsWith('http')) return false
+  try {
+    const parsed = new URL(url)
+    // External URLs that are not same-origin need proxy
+    return parsed.origin !== window.location.origin
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Get proxied URL for external images
+ */
+function getProxiedUrl(url: string): string {
+  if (!needsProxy(url)) return url
+  const apiUrl = getApiUrl()
+  return `${apiUrl}/api/proxy-image?url=${encodeURIComponent(url)}`
+}
+
+/**
  * Check if URL is from HuggingFace
  */
 function isHuggingFaceUrl(url: string): boolean {
@@ -85,11 +115,22 @@ export async function downloadImage(
 }
 
 /**
- * Convert image URL to PNG blob (for webp conversion)
+ * Convert image URL or base64 data URL to PNG blob
+ * Uses proxy for external URLs to avoid CORS issues
  */
 async function convertToPngBlob(url: string): Promise<Blob> {
-  const response = await fetch(url)
-  const blob = await response.blob()
+  let blob: Blob
+
+  // Handle base64 data URLs directly
+  if (url.startsWith('data:')) {
+    const response = await fetch(url)
+    blob = await response.blob()
+  } else {
+    // Use proxy for external URLs
+    const fetchUrl = getProxiedUrl(url)
+    const response = await fetch(fetchUrl)
+    blob = await response.blob()
+  }
 
   // If already PNG, return as-is
   if (blob.type === 'image/png') {
@@ -160,8 +201,17 @@ export async function downloadImagesAsZip(
       console.error(`Failed to process image ${filename}:`, error)
       // Try to add original image as fallback
       try {
-        const response = await fetch(url)
-        const blob = await response.blob()
+        let blob: Blob
+        if (url.startsWith('data:')) {
+          // Handle base64 data URLs
+          const response = await fetch(url)
+          blob = await response.blob()
+        } else {
+          // Use proxy for external URLs
+          const fetchUrl = getProxiedUrl(url)
+          const response = await fetch(fetchUrl)
+          blob = await response.blob()
+        }
         imagesFolder.file(filename, blob)
       } catch {
         console.error(`Failed to add image ${filename} to zip`)

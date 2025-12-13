@@ -2,6 +2,7 @@ import type { Node, Edge } from '@xyflow/react'
 import { create } from 'zustand'
 import { subscribeWithSelector, persist, createJSONStorage } from 'zustand/middleware'
 import { openDB, type IDBPDatabase } from 'idb'
+import { deleteBlobs, clearAllBlobs } from '@/lib/imageBlobStore'
 
 // Layout constants
 export const LAYOUT = {
@@ -40,6 +41,7 @@ export interface ImageData extends Record<string, unknown> {
   height: number
   seed: number
   imageUrl?: string
+  imageBlobId?: string // Reference to blob in separate IndexedDB store
   duration?: string
   isLoading: boolean
   error?: string
@@ -74,7 +76,7 @@ export interface FlowState {
   setEditingModified: (modified: boolean) => void
 
   updateConfigPosition: (configId: string, x: number, y: number) => void
-  updateImageGenerated: (imageId: string, url: string, duration: string) => void
+  updateImageGenerated: (imageId: string, url: string, duration: string, blobId?: string) => void
   updateImageError: (imageId: string, error: string) => void
 
   setLightboxImage: (imageId: string | null) => void
@@ -283,11 +285,11 @@ export const useFlowStore = create<FlowState>()(
           })
         },
 
-        updateImageGenerated: (imageId, url, duration) => {
+        updateImageGenerated: (imageId, url, duration, blobId) => {
           set((state) => ({
             imageNodes: state.imageNodes.map((n) =>
               n.id === imageId
-                ? { ...n, data: { ...n.data, imageUrl: url, duration, isLoading: false } }
+                ? { ...n, data: { ...n.data, imageUrl: url, imageBlobId: blobId, duration, isLoading: false } }
                 : n
             ),
           }))
@@ -308,13 +310,27 @@ export const useFlowStore = create<FlowState>()(
         },
 
         deleteConfig: (configId) => {
-          set((state) => ({
+          const state = get()
+          // Get blob IDs to delete
+          const blobIds = state.imageNodes
+            .filter((n) => n.data.configId === configId && n.data.imageBlobId)
+            .map((n) => n.data.imageBlobId as string)
+
+          // Delete blobs asynchronously
+          if (blobIds.length > 0) {
+            deleteBlobs(blobIds).catch(console.error)
+          }
+
+          set({
             configNodes: state.configNodes.filter((n) => n.id !== configId),
             imageNodes: state.imageNodes.filter((n) => n.data.configId !== configId),
-          }))
+          })
         },
 
         clearAll: () => {
+          // Clear all blobs asynchronously
+          clearAllBlobs().catch(console.error)
+
           set({
             configNodes: [],
             imageNodes: [],
