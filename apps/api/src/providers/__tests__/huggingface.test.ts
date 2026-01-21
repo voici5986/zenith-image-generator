@@ -77,7 +77,9 @@ describe('HuggingFaceProvider', () => {
   }
 
   function mockGradioQueueError(status: number, errorText: string) {
-    vi.mocked(fetch).mockResolvedValueOnce({
+    // callGradioApi retries transient statuses (404/503), so return the same failing
+    // response for all attempts.
+    vi.mocked(fetch).mockResolvedValue({
       ok: false,
       status,
       text: async () => errorText,

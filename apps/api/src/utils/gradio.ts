@@ -5,6 +5,11 @@
 import { Errors } from '@z-image/shared'
 
 const PROVIDER_NAME = 'HuggingFace'
+const MAX_GRADIO_RETRIES = 3
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
 
 /**
  * Parse HuggingFace error message into appropriate ApiError
@@ -98,31 +103,64 @@ export async function callGradioApi(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (hfToken) headers.Authorization = `Bearer ${hfToken}`
 
-  const queue = await fetch(`${baseUrl}/gradio_api/call/${endpoint}`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ data }),
-  })
+  // HuggingFace Spaces can be "cold" (starting/loading) and sometimes return transient 404/503.
+  // Retry a few times to reduce false-negative failures in serverless runtimes (e.g. Cloudflare).
+  let queueData: { event_id?: string } | null = null
+  for (let attempt = 0; attempt < MAX_GRADIO_RETRIES; attempt++) {
+    const queue = await fetch(`${baseUrl}/gradio_api/call/${endpoint}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ data }),
+    })
 
-  if (!queue.ok) {
+    if (queue.ok) {
+      queueData = (await queue.json()) as { event_id?: string }
+      break
+    }
+
     const errText = await queue.text().catch(() => '')
-    throw parseHuggingFaceError(errText || `Queue request failed: ${queue.status}`, queue.status)
+    const status = queue.status
+    const shouldRetry = attempt < MAX_GRADIO_RETRIES - 1 && (status === 404 || status === 503)
+    if (shouldRetry) {
+      await sleep(600 * (attempt + 1))
+      continue
+    }
+    throw parseHuggingFaceError(errText || `Queue request failed: ${status}`, status)
   }
 
-  const queueData = (await queue.json()) as { event_id?: string }
+  if (!queueData) {
+    throw Errors.providerError(PROVIDER_NAME, 'Queue request failed after retries')
+  }
+
   if (!queueData.event_id) {
     throw Errors.providerError(PROVIDER_NAME, 'No event_id returned from queue')
   }
 
-  const result = await fetch(`${baseUrl}/gradio_api/call/${endpoint}/${queueData.event_id}`, {
-    headers,
-  })
-  if (!result.ok) {
+  let text = ''
+  for (let attempt = 0; attempt < MAX_GRADIO_RETRIES; attempt++) {
+    const result = await fetch(`${baseUrl}/gradio_api/call/${endpoint}/${queueData.event_id}`, {
+      headers,
+    })
+
+    if (result.ok) {
+      text = await result.text()
+      break
+    }
+
     const errText = await result.text().catch(() => '')
-    throw parseHuggingFaceError(errText || `Result request failed: ${result.status}`, result.status)
+    const status = result.status
+    const shouldRetry = attempt < MAX_GRADIO_RETRIES - 1 && (status === 404 || status === 503)
+    if (shouldRetry) {
+      await sleep(600 * (attempt + 1))
+      continue
+    }
+    throw parseHuggingFaceError(errText || `Result request failed: ${status}`, status)
   }
 
-  const text = await result.text()
+  if (!text) {
+    throw Errors.providerError(PROVIDER_NAME, 'Empty result after retries')
+  }
+
   const complete = extractCompleteEventData(text)
 
   // Normalize the "complete" payload to the common `unknown[]` that providers expect.
